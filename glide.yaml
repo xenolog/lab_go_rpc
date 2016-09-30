@@ -1,0 +1,6 @@
+package: github.com/xenolog/lab_go_rpc
+import:
+  - package: github.com/xtaci/kcp-go
+  - package: github.com/xtaci/smux
+  - package: gopkg.in/urfave/cli.v1
+  - package: gopkg.in/xenolog/go-tiny-logger.v1

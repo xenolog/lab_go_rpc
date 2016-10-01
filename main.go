@@ -1,17 +1,15 @@
 package main
 
 import (
-	// "errors"
-	// "fmt"
+	"fmt"
 	"github.com/xenolog/lab_go_rpc/simple_task"
 	kcp "github.com/xtaci/kcp-go"
 	cli "gopkg.in/urfave/cli.v1"
 	"gopkg.in/xenolog/go-tiny-logger.v1"
+	"math/rand"
 	"net"
 	"net/rpc"
 	"os"
-	// "strings"
-	// "time"
 )
 
 const (
@@ -91,30 +89,44 @@ func runServer(c *cli.Context) error {
 		Log.Info("RPC call from: %s will be served", conn.RemoteAddr())
 		go rpcserver.ServeConn(conn)
 	}
+	return nil
 }
 
-func runClient(c *cli.Context) {
+func runClient(c *cli.Context) error {
 	serverAddr := []string{c.GlobalString("url")}
 	var (
-		conn net.Conn
-		err  error
+		conn     net.Conn
+		err      error
+		srv      *rpc.Client
+		reply    []simple_task.TaskResult
+		jobCount int
 	)
 	// create connection
 	if conn, err = kcp.Dial(serverAddr[0]); err != nil {
 		Log.Fail("dialing:", err)
 	}
 	// create RPC client
-	srv := rpc.NewClient(conn)
+	srv = rpc.NewClient(conn)
 	args := &simple_task.Args{7, 8}
-	var reply int
-	// RPC call
-	if err := srv.Call("Tasks.Task1", args, &reply); err != nil {
-		Log.Fail("RPC error:", err)
+	// RPC calls
+	jobCount = rand.Intn(15) + 1
+	reply = make([]simple_task.TaskResult, jobCount)
+	done := make(chan *rpc.Call, jobCount)
+	Log.Info("%d RPC calls will be started", jobCount)
+	for i := 0; i < jobCount; i++ {
+		rpcMethodName := fmt.Sprintf("Tasks.Task%d", i%2+1)
+		srv.Go(rpcMethodName, args, &reply[i], done)
+		Log.Debug("RPC method #%02d %s started", i, rpcMethodName)
 	}
-	Log.Info("RPC call: %d*%d=%d", args.A, args.B, reply)
-	// RPC call
-	if err := srv.Call("Tasks.Task2", args, &reply); err != nil {
-		Log.Fail("RPC error:", err)
+	// fetch results and display ones
+	for i := cap(done); i > 0; i-- {
+		rv := <-done
+		rvi := rv.Reply.(*simple_task.TaskResult)
+		Log.Info("RPC method %s, with args [%s], return %d, elapsed time: %5.2f",
+			rv.ServiceMethod, rv.Args,
+			rvi.Result, rvi.Duration.Seconds())
 	}
-	Log.Info("RPC call: %d+%d=%d", args.A, args.B, reply)
+	srv.Close()
+	conn.Close()
+	return nil
 }

@@ -1,17 +1,15 @@
 package main
 
 import (
-	// "errors"
-	// "fmt"
 	"github.com/xenolog/lab_go_rpc/simple_task"
 	kcp "github.com/xtaci/kcp-go"
+	smux "github.com/xtaci/smux"
 	cli "gopkg.in/urfave/cli.v1"
 	"gopkg.in/xenolog/go-tiny-logger.v1"
 	"net"
 	"net/rpc"
 	"os"
-	// "strings"
-	// "time"
+	"time"
 )
 
 const (
@@ -60,7 +58,7 @@ func init() {
 		} else {
 			Log.SetMinimalFacility(logger.LOG_I)
 		}
-		Log.Debug("EtcdTree started.")
+		Log.Debug("Started.")
 		return nil
 	}
 	App.CommandNotFound = func(c *cli.Context, cmd string) {
@@ -71,6 +69,43 @@ func init() {
 
 func main() {
 	App.Run(os.Args)
+}
+
+func pingServer(conn net.Conn) error {
+	var (
+		sess     *smux.Session
+		err      error
+		upStream *smux.Stream
+		dnStream *smux.Stream
+	)
+	defer func() {
+		conn.Close()
+	}()
+	// setup session (one per client)
+	if sess, err = smux.Server(conn, nil); err != nil {
+		Log.Error("SMUX server bind error:", err)
+		return err
+	}
+	// waiting for ping
+	if upStream, err = sess.AcceptStream(); err != nil {
+		Log.Error("SMUX accept error:", err)
+		return err
+	}
+	buf := make([]byte, 4)
+	upStream.Read(buf)
+	Log.Info("received '%s'", buf)
+	upStream.Write([]byte("pong"))
+	upStream.Read(buf)
+	Log.Info("received '%s'", buf)
+	if dnStream, err = sess.OpenStream(); err != nil {
+		Log.Error("OpenStream error:", err)
+		return err
+	}
+	dnStream.Write([]byte("Ping"))
+	dnStream.Read(buf)
+	Log.Info("received '%s'", buf)
+
+	return nil
 }
 
 func runServer(c *cli.Context) error {
@@ -88,33 +123,56 @@ func runServer(c *cli.Context) error {
 		if err != nil {
 			Log.Error("connection error:", err)
 		}
-		Log.Info("RPC call from: %s will be served", conn.RemoteAddr())
-		go rpcserver.ServeConn(conn)
+		Log.Info("Incoming connection from: %s will be served", conn.RemoteAddr())
+		go pingServer(conn)
 	}
+	return nil
 }
 
-func runClient(c *cli.Context) {
+func runClient(c *cli.Context) error {
 	serverAddr := []string{c.GlobalString("url")}
 	var (
-		conn net.Conn
-		err  error
+		conn     net.Conn
+		err      error
+		sess     *smux.Session
+		upStream *smux.Stream
+		dnStream *smux.Stream
 	)
 	// create connection
 	if conn, err = kcp.Dial(serverAddr[0]); err != nil {
 		Log.Fail("dialing:", err)
+		return err
 	}
-	// create RPC client
-	srv := rpc.NewClient(conn)
-	args := &simple_task.Args{7, 8}
-	var reply int
-	// RPC call
-	if err := srv.Call("Tasks.Task1", args, &reply); err != nil {
-		Log.Fail("RPC error:", err)
+	defer func() {
+		conn.Close()
+	}()
+	// start multiplexer
+	if sess, err = smux.Client(conn, nil); err != nil {
+		Log.Fail("Multiplexer:", err)
+		return err
 	}
-	Log.Info("RPC call: %d*%d=%d", args.A, args.B, reply)
-	// RPC call
-	if err := srv.Call("Tasks.Task2", args, &reply); err != nil {
-		Log.Fail("RPC error:", err)
+	// start session
+	if upStream, err = sess.OpenStream(); err != nil {
+		Log.Error("OpenStream error:", err)
+		return err
 	}
-	Log.Info("RPC call: %d+%d=%d", args.A, args.B, reply)
+	// dialog
+	buf := make([]byte, 4)
+	upStream.Write([]byte("ping"))
+	upStream.Read(buf)
+	Log.Info("received '%s'", buf)
+	upStream.Write([]byte("wait"))
+	// waiting reversed connection
+	if dnStream, err = sess.AcceptStream(); err != nil {
+		Log.Error("SMUX accept error:", err)
+		return err
+	}
+	dnStream.Read(buf)
+	Log.Info("received '%s'", buf)
+	dnStream.Write([]byte("Pong"))
+	// End of communication
+	upStream.Close()
+	time.Sleep(time.Second)
+	dnStream.Close()
+	return nil
 }

@@ -9,11 +9,14 @@ import (
 	"math/rand"
 	"net"
 	"net/rpc"
+	"net/rpc/jsonrpc"
 	"os"
+	"time"
 )
 
 const (
 	Version = "0.0.1"
+	CMD_LEN = 3
 )
 
 var (
@@ -58,7 +61,7 @@ func init() {
 		} else {
 			Log.SetMinimalFacility(logger.LOG_I)
 		}
-		Log.Debug("EtcdTree started.")
+		Log.Debug("Started.")
 		return nil
 	}
 	App.CommandNotFound = func(c *cli.Context, cmd string) {
@@ -81,13 +84,26 @@ func runServer(c *cli.Context) error {
 		Log.Error("listen error:", err)
 		os.Exit(1)
 	}
+	cmd_buff := make([]byte, CMD_LEN)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			Log.Error("connection error:", err)
 		}
-		Log.Info("RPC call from: %s will be served", conn.RemoteAddr())
-		go rpcserver.ServeConn(conn)
+		Log.Debug("Connection from: %s", conn.RemoteAddr())
+		if _, err = conn.Read(cmd_buff); err != nil {
+			Log.Error("Session initialization error:", err)
+			continue
+		}
+		Log.Debug("Request: '%s'", cmd_buff)
+		switch fmt.Sprintf("%s", cmd_buff) {
+		case "RPC":
+			Log.Info("JSON-RPC call from: %s will be served", conn.RemoteAddr())
+			codec := jsonrpc.NewServerCodec(conn)
+			go rpcserver.ServeCodec(codec)
+		default:
+			Log.Error("Session initialization error:", err)
+		}
 	}
 	return nil
 }
@@ -97,7 +113,7 @@ func runClient(c *cli.Context) error {
 	var (
 		conn     net.Conn
 		err      error
-		srv      *rpc.Client
+		rpc_sess *rpc.Client
 		reply    []simple_task.TaskResult
 		jobCount int
 	)
@@ -105,8 +121,14 @@ func runClient(c *cli.Context) error {
 	if conn, err = kcp.Dial(serverAddr[0]); err != nil {
 		Log.Fail("dialing:", err)
 	}
+	// call RPC handler
+	if _, err = conn.Write([]byte("RPC")); err != nil {
+		Log.Fail("RPC session initialization error:", err)
+		return err
+	}
 	// create RPC client
-	srv = rpc.NewClient(conn)
+	codec := jsonrpc.NewClientCodec(conn)
+	rpc_sess = rpc.NewClientWithCodec(codec)
 	args := &simple_task.Args{7, 8}
 	// RPC calls
 	jobCount = rand.Intn(15) + 1
@@ -115,7 +137,7 @@ func runClient(c *cli.Context) error {
 	Log.Info("%d RPC calls will be started", jobCount)
 	for i := 0; i < jobCount; i++ {
 		rpcMethodName := fmt.Sprintf("Tasks.Task%d", i%2+1)
-		srv.Go(rpcMethodName, args, &reply[i], done)
+		rpc_sess.Go(rpcMethodName, args, &reply[i], done)
 		Log.Debug("RPC method #%02d %s started", i, rpcMethodName)
 	}
 	// fetch results and display ones
@@ -124,9 +146,10 @@ func runClient(c *cli.Context) error {
 		rvi := rv.Reply.(*simple_task.TaskResult)
 		Log.Info("RPC method %s, with args [%s], return %d, elapsed time: %5.2f",
 			rv.ServiceMethod, rv.Args,
-			rvi.Result, rvi.Duration.Seconds())
+			rvi.Result, rvi.Duration.Seconds()) // Miliseconds / 1000
 	}
-	srv.Close()
+	rpc_sess.Close()
+	time.Sleep(time.Second)
 	conn.Close()
 	return nil
 }
